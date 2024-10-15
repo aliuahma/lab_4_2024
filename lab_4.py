@@ -1,133 +1,291 @@
-# Copyright 2021 Stogl Robotics Consulting UG (haftungsbeschränkt)
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
+from std_msgs.msg import Float64MultiArray
+import numpy as np
+np.set_printoptions(precision=3, suppress=True)
 
+def rotation_x(angle):
+    # rotation about the x-axis implemented for you
+            return np.array([
+                [1, 0, 0, 0],
+                [0, np.cos(angle), -np.sin(angle), 0],
+                [0, np.sin(angle), np.cos(angle), 0],
+                [0, 0, 0, 1]
+            ])
 
-from launch import LaunchDescription
-from launch.actions import RegisterEventHandler
-from launch.event_handlers import OnProcessExit
-from launch.substitutions import Command, FindExecutable, PathJoinSubstitution
+def rotation_y(angle):
+    return np.array([
+                [np.cos(angle), 0, np.sin(angle), 0],
+                [0, 1, 0, 0],
+                [-np.sin(angle), 0, np.cos(angle), 0],
+                [0, 0, 0, 1]
+            ])
 
-from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
+def rotation_z(angle):
+    return np.array([
+                [np.cos(angle), -np.sin(angle), 0, 0],
+                [np.sin(angle), np.cos(angle), 0, 0],
+                [0, 0, 1, 0],
+                [0, 0, 0, 1]
+            ])
 
+def translation(x, y, z):
+    return np.array([
+                [1, 0, 0, x],
+                [0, 1, 0, y],
+                [0, 0, 1, z],
+                [0, 0, 0, 1]
+            ])
 
-def generate_launch_description():
-    # Get URDF via xacro
-    robot_description_content = Command(
-        [
-            PathJoinSubstitution([FindExecutable(name="xacro")]),
-            " ",
-            PathJoinSubstitution(
-                [
-#                    FindPackageShare("control_board_hardware_interface"),
-                    # "/home/pi/ros2_ws/src/control_board_hardware_interface",
-                    # "test",
-                    # "test_state_publisher.urdf.xacro",
-                    "/home/pi/ros2_ws/src/pupper_v3_description",
-                    "description",
-                    "pupper_v3.urdf.xacro",
-                ]
-            ),
-        ]
-    )
-    robot_description = {"robot_description": robot_description_content}
+class InverseKinematics(Node):
 
-    robot_controllers = PathJoinSubstitution(
-        [
-#            FindPackageShare("control_board_hardware_interface"),
-            "/home/pi/lab_4",
-            "lab_4.yaml",
-        ]
-    )
-    # rviz_config_file = PathJoinSubstitution(
-    #     [FindPackageShare("ros2_control_demo_example_1"), "rviz", "rrbot.rviz"]
-    # )
+    def __init__(self):
+        super().__init__('inverse_kinematics')
+        self.joint_subscription = self.create_subscription(
+            JointState,
+            'joint_states',
+            self.listener_callback,
+            10)
+        self.joint_subscription  # prevent unused variable warning
 
-    control_node = Node(
-        package="controller_manager",
-        executable="ros2_control_node",
-        parameters=[robot_description, robot_controllers],
-        output="both",
-    )
-    robot_state_pub_node = Node(
-        package="robot_state_publisher",
-        executable="robot_state_publisher",
-        output="both",
-        parameters=[robot_description],
-    )
-    # rviz_node = Node(
-    #     package="rviz2",
-    #     executable="rviz2",
-    #     name="rviz2",
-    #     output="log",
-    #     arguments=["-d", rviz_config_file],
-    # )
-#    joy_node = Node(
-#        package="joy_linux",
-#        executable="joy_linux_node",
-#        output="both",
-#    )
-
-    joint_state_broadcaster_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["joint_state_broadcaster", "--controller-manager", "/controller_manager", "--controller-manager-timeout", "30"],
-    )
-
-    imu_sensor_broadcaster_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["imu_sensor_broadcaster", "--controller-manager", "/controller_manager", "--controller-manager-timeout", "30"],
-    )
-
-    robot_controller_spawner = Node(
-        package="controller_manager",
-        executable="spawner",
-        arguments=["forward_command_controller", "--controller-manager", "/controller_manager", "--controller-manager-timeout", "30"],
-    )
-
-    # Delay rviz start after `joint_state_broadcaster`
-    # delay_rviz_after_joint_state_broadcaster_spawner = RegisterEventHandler(
-    #     event_handler=OnProcessExit(
-    #         target_action=joint_state_broadcaster_spawner,
-    #         on_exit=[rviz_node],
-    #     )
-    # )
-
-    # delay_joint_state_broadcaster_spawner_after_control_node = RegisterEventHandler(
-    #     event_handler=OnProcessExit(
-    #         target_action=joint_state_broadcaster_spawner,
-    #         on_exit=[control_node],
-    #     )
-    # )
-
-    # Delay start of robot_controller after `joint_state_broadcaster`
-    delay_robot_controller_spawner_after_joint_state_broadcaster_spawner = RegisterEventHandler(
-        event_handler=OnProcessExit(
-            target_action=joint_state_broadcaster_spawner,
-            on_exit=[robot_controller_spawner],
+        self.command_publisher = self.create_publisher(
+            Float64MultiArray,
+            '/forward_command_controller/commands',
+            10
         )
-    )
 
-    nodes = [
-        control_node,
- #       joy_node,
-        robot_state_pub_node,
-        joint_state_broadcaster_spawner,
-        imu_sensor_broadcaster_spawner,
-        # delay_rviz_after_joint_state_broadcaster_spawner,
-        delay_robot_controller_spawner_after_joint_state_broadcaster_spawner,
-    ]
+        self.joint_positions = None
+        self.joint_velocities = None
+        self.target_joint_positions = None
+        self.counter = 0
 
-    return LaunchDescription(nodes)
+        # Trotting gate positions, already implemented
+        touch_down_position = np.array([0.05, 0.0, -0.14])
+        stand_position_1 = np.array([0.025, 0.0, -0.14])
+        stand_position_2 = np.array([0.0, 0.0, -0.14])
+        stand_position_3 = np.array([-0.025, 0.0, -0.14])
+        liftoff_position = np.array([-0.05, 0.0, -0.14])
+        mid_swing_position = np.array([0.0, 0.0, -0.05])
+        
+        ## trotting
+        # TODO: Implement each leg’s trajectory in the trotting gait.
+        rf_ee_offset = np.array([0.06, -0.09, 0])
+        rf_ee_triangle_positions = np.array([
+            ################################################################################################
+            # TODO: Implement the trotting gait
+            ################################################################################################
+        ]) + rf_ee_offset
+        
+        lf_ee_offset = np.array([0.06, 0.09, 0])
+        lf_ee_triangle_positions = np.array([
+            ################################################################################################
+            # TODO: Implement the trotting gait
+            ################################################################################################
+        ]) + lf_ee_offset
+        
+        rb_ee_offset = np.array([-0.11, -0.09, 0])
+        rb_ee_triangle_positions = np.array([
+            ################################################################################################
+            # TODO: Implement the trotting gait
+            ################################################################################################
+        ]) + rb_ee_offset
+        
+        lb_ee_offset = np.array([-0.11, 0.09, 0])
+        lb_ee_triangle_positions = np.array([
+            ################################################################################################
+            # TODO: Implement the trotting gait
+            ################################################################################################
+        ]) + lb_ee_offset
+
+
+        self.ee_triangle_positions = [rf_ee_triangle_positions, lf_ee_triangle_positions, rb_ee_triangle_positions, lb_ee_triangle_positions]
+        self.fk_functions = [self.fr_leg_fk, self.fl_leg_fk, self.br_leg_fk, self.lb_leg_fk]
+
+        self.target_joint_positions_cache, self.target_ee_cache = self.cache_target_joint_positions()
+        print(f'shape of target_joint_positions_cache: {self.target_joint_positions_cache.shape}')
+        print(f'shape of target_ee_cache: {self.target_ee_cache.shape}')
+
+
+        self.pd_timer_period = 1.0 / 200  # 200 Hz
+        self.ik_timer_period = 1.0 / 100   # 10 Hz
+        self.pd_timer = self.create_timer(self.pd_timer_period, self.pd_timer_callback)
+        self.ik_timer = self.create_timer(self.ik_timer_period, self.ik_timer_callback)
+
+
+    def fr_leg_fk(self, theta):
+        # Already implemented in Lab 2
+        T_RF_0_1 = translation(0.07500, -0.08350, 0) @ rotation_x(1.57080) @ rotation_z(theta[0])
+        T_RF_1_2 = rotation_y(-1.57080) @ rotation_z(theta[1])
+        T_RF_2_3 = translation(0, -0.04940, 0.06850) @ rotation_y(1.57080) @ rotation_z(theta[2])
+        T_RF_3_ee = translation(0.06231, -0.06216, 0.01800)
+        T_RF_0_ee = T_RF_0_1 @ T_RF_1_2 @ T_RF_2_3 @ T_RF_3_ee
+        return T_RF_0_ee[:3, 3]
+
+    def fl_leg_fk(self, theta):
+        T_FL_0_1 = translation(0.075,0.0835,0) @ rotation_x(-1.57080) @ rotation_z(theta[0])
+        T_FL_1_2 = translation(0, 0, 0.039) @ rotation_y(-1.57080) @ rotation_z(theta[1])
+        T_FL_2_3 = translation(0, -0.04940, 0.06850) @ rotation_y(-1.57080) @ rotation_z(theta[2])
+        T_FL_3_ee = translation(0.06231, -0.06216, 0.01800)
+        T_FL_0_ee = T_FL_0_1 @ T_FL_1_2 @ T_FL_2_3 @ T_FL_3_ee
+        return T_FL_0_ee[:3, 3]
+
+    def br_leg_fk(self, theta):
+        T_RB_0_1 = translation(-0.075,-0.0725,0) @ rotation_x(1.57080) @ rotation_z(theta[0])
+        T_RB_1_2 = translation(0, 0, 0.039) @ rotation_y(-1.57080) @ rotation_z(theta[1])
+        T_RB_2_3 = translation(0, -0.04940, 0.06850) @ rotation_y(1.57080) @ rotation_z(theta[2])
+        T_RB_3_ee = translation(0.06231, -0.06216, 0.01800)
+        T_RB_0_ee = T_RB_0_1 @ T_RB_1_2 @ T_RB_2_3 @ T_RB_3_ee
+        return T_RB_0_ee[:3, 3]
+
+
+
+    def lb_leg_fk(self, theta):
+        T_LB_0_1 = translation(-0.075,0.0725,0) @ rotation_x(-1.57080) @ rotation_z(theta[0])
+        T_LB_1_2 = translation(0, 0, 0.039) @ rotation_y(-1.57080) @ rotation_z(theta[1])
+        T_LB_2_3 = translation(0, -0.04940, 0.06850) @ rotation_y(-1.57080) @ rotation_z(theta[2])
+        T_LB_3_ee = translation(0.06231, -0.06216, 0.01800)
+        T_LB_0_ee = T_LB_0_1 @ T_LB_1_2 @ T_LB_2_3 @ T_LB_3_ee
+        return T_LB_0_ee[:3, 3]
+
+
+    def forward_kinematics(self, theta):
+        return np.concatenate([self.fk_functions[i](theta[3*i: 3*i+3]) for i in range(4)])
+
+    def listener_callback(self, msg):
+        joints_of_interest = [
+            'leg_front_r_1', 'leg_front_r_2', 'leg_front_r_3', 
+            'leg_front_l_1', 'leg_front_l_2', 'leg_front_l_3', 
+            'leg_back_r_1', 'leg_back_r_2', 'leg_back_r_3', 
+            'leg_back_l_1', 'leg_back_l_2', 'leg_back_l_3'
+        ]
+        self.joint_positions = np.array([msg.position[msg.name.index(joint)] for joint in joints_of_interest])
+        self.joint_velocities = np.array([msg.velocity[msg.name.index(joint)] for joint in joints_of_interest])
+
+    def inverse_kinematics_single_leg(self, target_ee, leg_index, initial_guess=[0, 0, 0]):
+        leg_forward_kinematics = self.fk_functions[leg_index]
+
+        def cost_function(theta):
+            # Compute the cost function and the L1 norm of the error
+            # return the cost and the L1 norm of the error
+
+            target_current_difference = self.forward_kinematics(theta[0], theta[1], theta[2]) - target_ee
+
+            cost = np.sum(target_current_difference ** 2)
+            errorNorm = np.sum(np.abs(target_current_difference))
+
+            return cost, errorNorm
+
+        def gradient(theta, epsilon=1e-3):
+            # Compute the gradient of the cost function using finite differences
+
+            # cost_plus = cost_function(theta + epsilon)[0]
+            # cost_minus = cost_function(theta - epsilon)[0]
+
+            # grad = (cost_plus - cost_minus) / (2 * epsilon)
+
+            grad = np.zeros_like(theta)
+
+            for i in range(len(theta)):
+                
+                theta_plus = theta.copy()
+                theta_plus[i] += epsilon
+
+                theta_minus = theta.copy()
+                theta_minus[i] -= epsilon
+
+                cost_plus = cost_function(theta_plus)[0]
+                cost_minus = cost_function(theta_minus)[0]
+
+                grad[i] = (cost_plus - cost_minus) / (2 * epsilon)
+
+            return grad
+
+        theta = np.array(initial_guess)
+        learning_rate = 10 # TODO: Set the learning rate
+        max_iterations = 50 # TODO: Set the maximum number of iterations
+        tolerance = 0.001 # TODO: Set the tolerance for the L1 norm of the `error`
+
+        cost_l = []
+        for _ in range(max_iterations):
+            ################################################################################################
+            # TODO: [already done] paste lab 3 inverse kinematics here
+            ################################################################################################
+            continue
+
+        return theta
+
+    def interpolate_triangle(self, t, leg_index):
+        ################################################################################################
+        # TODO: implement interpolation for all 4 legs here
+        ################################################################################################
+        
+        return
+
+    def cache_target_joint_positions(self):
+        # Calculate and store the target joint positions for a cycle and all 4 legs
+        target_joint_positions_cache = []
+        target_ee_cache = []
+        for leg_index in range(4):
+            target_joint_positions_cache.append([])
+            target_ee_cache.append([])
+            target_joint_positions = [0] * 3
+            for t in np.arange(0, 1, 0.02):
+                print(t)
+                target_ee = self.interpolate_triangle(t, leg_index)
+                target_joint_positions = self.inverse_kinematics_single_leg(target_ee, leg_index, initial_guess=target_joint_positions)
+
+                target_joint_positions_cache[leg_index].append(target_joint_positions)
+                target_ee_cache[leg_index].append(target_ee)
+
+        # (4, 50, 3) -> (50, 12)
+        target_joint_positions_cache = np.concatenate(target_joint_positions_cache, axis=1)
+        target_ee_cache = np.concatenate(target_ee_cache, axis=1)
+        
+        return target_joint_positions_cache, target_ee_cache
+
+    def get_target_joint_positions(self):
+        target_joint_positions = self.target_joint_positions_cache[self.counter]
+        target_ee = self.target_ee_cache[self.counter]
+        self.counter += 1
+        if self.counter >= self.target_joint_positions_cache.shape[0]:
+            self.counter = 0
+        return target_ee, target_joint_positions
+
+    def ik_timer_callback(self):
+        if self.joint_positions is not None:
+            target_ee, self.target_joint_positions = self.get_target_joint_positions()
+            current_ee = self.forward_kinematics(self.joint_positions)
+
+            self.get_logger().info(
+                f'Target EE: {target_ee}, \
+                Current EE: {current_ee}, \
+                Target Angles: {self.target_joint_positions}, \
+                Target Angles to EE: {self.forward_kinematics(self.target_joint_positions)}, \
+                Current Angles: {self.joint_positions}')
+
+    def pd_timer_callback(self):
+        if self.target_joint_positions is not None:
+            command_msg = Float64MultiArray()
+            command_msg.data = self.target_joint_positions.tolist()
+            self.command_publisher.publish(command_msg)
+
+def main():
+    rclpy.init()
+    inverse_kinematics = InverseKinematics()
+    
+    try:
+        rclpy.spin(inverse_kinematics)
+    except KeyboardInterrupt:
+        print("Program terminated by user")
+    finally:
+        # Send zero torques
+        zero_torques = Float64MultiArray()
+        zero_torques.data = [0.0] * 12
+        inverse_kinematics.command_publisher.publish(zero_torques)
+        
+        inverse_kinematics.destroy_node()
+        rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
